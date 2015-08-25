@@ -7,67 +7,50 @@
 using System;
 using System.Linq;
 using UnityEngine;
-using System.Collections;
 
 namespace KerbalFoundries
 {
-	public class ModuleWaterSlider : VesselModule
+	public class ModuleWaterSlider : PartModule
 	{
+        public float colliderHeight = -2.5f;
+
         GameObject _collider;
-		const float triggerDistance = 25f;
-		bool isActive;
+		// disable once ConvertToConstant.Local
+		float triggerDistance = 25f;
+		//bool isActive; // never used.
 		Vessel _vessel;
 		Vector3 boxSize = new Vector3(300f, .5f, 300f);
-		public float colliderHeight = -2.5f;
+		
 		bool isReady;
 		
 		/// <summary>Local name of the KFLogUtil class.</summary>
 		readonly KFLogUtil KFLog = new KFLogUtil("ModuleWaterSlider");
 
-		void Start()
+		GameObject visibleSliderSurface;
+		
+		public void StartUp()
 		{
 			KFLog.Log("WaterSlider start.");
 			_vessel = GetComponent<Vessel>();
-		
-			float repulsorCount = 0;
-			foreach (Part PA in _vessel.parts)
-			{
-				foreach (KFRepulsor RA in PA.GetComponentsInChildren<KFRepulsor>())
-					repulsorCount++;
-				foreach (RepulsorWheel RA in PA.GetComponentsInChildren<RepulsorWheel>())
-					repulsorCount++;
-			}
 
-			isActive |= repulsorCount > 0;
+            _collider = new GameObject("ModuleWaterSlider.Collider");
+            KFLog.Log("Continuing...");
 
-            if (isActive && _vessel.isCommandable)
-            {
-                _collider = new GameObject("ModuleWaterSlider.Collider");
-                Debug.LogError("Continuing...");
+			visibleSliderSurface = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            visibleSliderSurface.transform.parent = _collider.transform;
+            visibleSliderSurface.transform.localScale = boxSize;
+			visibleSliderSurface.renderer.enabled = false;
 
-                var visible = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                visible.transform.parent = _collider.transform;
-                visible.transform.localScale = boxSize;
-                visible.renderer.enabled = true; // enable to see collider
+            var box = (BoxCollider)_collider.AddComponent("BoxCollider");
+            box.size = boxSize; // Probably should encapsulate other colliders in real code
 
-                BoxCollider box = _collider.AddComponent("BoxCollider") as BoxCollider;
-                box.size = boxSize; // Probably should encapsulate other colliders in real code
+            var rb = (Rigidbody)_collider.AddComponent("Rigidbody");
+            rb.rigidbody.isKinematic = true;
 
-                Rigidbody rb = _collider.AddComponent("Rigidbody") as Rigidbody;
-                rb.rigidbody.isKinematic = true;
+            _collider.SetActive(true);
 
-                _collider.SetActive(true);
-
-                UpdatePosition();
-                isReady = true;
-            }
-
-            else
-            {
-                Destroy(_collider);
-                KFLog.Log("Setting size to zero and returning.");
-                return;
-            }
+            UpdatePosition();
+     	       isReady = true;
 		}
 
 		void UpdatePosition()
@@ -82,27 +65,32 @@ namespace KerbalFoundries
 		{
 			if (!isReady)
 				return;
-			if (Vector3.Distance(_collider.transform.position, _vessel.transform.position) > triggerDistance && isReady)
+			if (Vector3.Distance(_collider.transform.position, _vessel.transform.position) > triggerDistance)
 				UpdatePosition();
 			colliderHeight = Mathf.Clamp((colliderHeight -= 0.1f), -10, 2.5f);
+			visibleSliderSurface.renderer.enabled = KFPersistenceManager.debugIsWaterColliderVisible; // NEW: Enabled and disabled via a debug option in the GUI settings window.  Turns off if debug is turned off, otherwise stays persistent.
 		}
-	}
+    }
 
-	public class ModuleCameraShot : VesselModule
+	public class ModuleCameraShot : PartModule
 	{
 		// disable RedundantDefaultFieldInitializer
+		// disable ConvertToConstant.Local
 		
-		const int resWidth = 6;
-		const int resHeight = 6;
+		int resWidth = 6;
+		int resHeight = 6;
 		public Color _averageColour = new Color(1f, 1f, 1f, 1f);
-		int frameCount = 0;
-		const int threshHold = 1;
+		
+        int frameCount = 0;
+		int threshHold = 10;
 		Vessel _vessel;
 		GameObject _cameraObject;
 		Camera _camera;
 		Texture2D groundShot;
 		RenderTexture renderTexture;
 		bool dustCam;
+        int kFPartCount;
+        bool isReady;
 
 		/// <summary>Local definition of the KFLogUtil class.</summary>
 		readonly KFLogUtil KFLog = new KFLogUtil("ModuleCameraShot");
@@ -110,31 +98,45 @@ namespace KerbalFoundries
 		/// <summary>The layers that the camera will render.</summary>
 		public int cameraMask;
 
-		void Start()
+		public void StartUp()
 		{
-			_vessel = GetComponent<Vessel>();
-			_cameraObject = new GameObject("ColourCam");
-            
-			_cameraObject.transform.parent = _vessel.transform;
-			_cameraObject.transform.LookAt(_vessel.mainBody.transform.position);
-			_cameraObject.transform.Translate(new Vector3(0, 0, -10));
-			_camera = _cameraObject.AddComponent<Camera>();
-			_camera.targetTexture = renderTexture;
-			cameraMask = 32784;	// Layers 4 and 15, or water and local scenery.
-			// Generated from the binary place value output of 4 and 15 added to each other.
-			// (1 << 4) | (1 << 15) = (16) | (32768) = 32784
-			_camera.cullingMask = cameraMask;
+            KFLog.Warning("ModuleCamerashot Start");
+            _vessel = GetComponent<Vessel>();
+            foreach (Part PA in _vessel.parts)
+            {
+                foreach (KFRepulsor RA in PA.GetComponentsInChildren<KFRepulsor>())
+                    kFPartCount++;
+                foreach (KFModuleWheel RA in PA.GetComponentsInChildren<KFModuleWheel>())
+                    kFPartCount++;
+            }
+            if (kFPartCount > 1)
+            {
+                KFLog.Warning("Starting camera");
+                
+                _cameraObject = new GameObject("ColourCam");
 
-			_camera.enabled = false;
-			renderTexture = new RenderTexture(resWidth, resHeight, 24);
-			groundShot = new Texture2D(resWidth, resHeight, TextureFormat.RGB24, false);
-			dustCam = KFPersistenceManager.isDustCameraEnabled;
+                _cameraObject.transform.parent = _vessel.transform;
+                _cameraObject.transform.LookAt(_vessel.mainBody.transform.position);
+                _cameraObject.transform.Translate(new Vector3(0, 0, -10));
+                _camera = _cameraObject.AddComponent<Camera>();
+                _camera.targetTexture = renderTexture;
+                cameraMask = 32784;	// Layers 4 and 15, or water and local scenery.
+                // Generated from the binary place value output of 4 and 15 added to each other.
+                // (1 << 4) | (1 << 15) = (16) | (32768) = 32784
+                _camera.cullingMask = cameraMask;
+
+                _camera.enabled = false;
+                renderTexture = new RenderTexture(resWidth, resHeight, 24);
+                groundShot = new Texture2D(resWidth, resHeight, TextureFormat.RGB24, false);
+                dustCam = KFPersistenceManager.isDustCameraEnabled;
+                isReady = true;
+            }
 		}
 
 		public void Update()
 		{
 			dustCam = KFPersistenceManager.isDustCameraEnabled;
-			if (frameCount >= threshHold && _vessel == FlightGlobals.ActiveVessel && dustCam)
+			if (frameCount >= threshHold && Equals(_vessel, FlightGlobals.ActiveVessel) && dustCam && isReady)
 			{
 				frameCount = 0;
 
@@ -157,7 +159,7 @@ namespace KerbalFoundries
                 float r = texColors[0].r;
                 float g = texColors[0].g;
                 float b = texColors[0].b;
-				const float alpha = 0.014f;
+				float alpha = 0.014f;
 
 				for (int i = 0; i < total; i++)
 				{

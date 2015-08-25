@@ -17,9 +17,7 @@
 
 using System;
 using System.Collections.Generic;
-using System.Collections;
 using System.Linq;
-using System.Text;
 using UnityEngine;
 using KerbalFoundries;
 
@@ -32,32 +30,28 @@ namespace KerbalFoundries
 		// disable AccessToStaticMemberViaDerivedType
 		// disable RedundantDefaultFieldInitializer
 		
+		KFRepulsor _repModule;
+		
 		readonly KFLogUtil KFLog = new KFLogUtil("KFDustFX");
-		
-		/// <summary>Part instance of KFModuleWheel</summary>
-		KFModuleWheel _KFModuleWheel;
-		
-		/// <summary>Part instance of KFRepulsor</summary>
-		KFRepulsor _KFRepulsor;
 		
 		/// <summary>The camera object we're using to get color info directly from the terrain.</summary>
 		ModuleCameraShot _ModuleCameraShot;
 		
-		/// <summary>Local copy of the tweakScaleCorrector parameter in the KFModuleWheel module.</summary>
-		public float tweakScaleCorrector = 1;
+		/// <summary>Config field to compensate for part size.</summary>
+		[KSPField]
+		public float partSizeFactor = 1;
+
+		/// <summary>Local copy of the tweakScaleCorrector parameter in KFModuleWheel.</summary>
+		/// <remarks>Passed here by the wheel module itself.</remarks>
+		public float tweakScaleFactor = 1;
 		
 		/// <summary>Specifies if the module is to be used for repulsors.</summary>
 		/// <remarks>Default is "false"</remarks>
 		[KSPField]
 		public bool isRepulsor = false;
 		
-		/// <summary>Mostly unnecessary, since there is no other purpose to having the module active.</summary>
-		/// <remarks>Default is "true"</remarks>
-		[KSPField]
-		public bool dustEffects = true;
-		
 		/// <summary>Minimum scrape speed.</summary>
-		/// <remarks>Default is 0.5.  Repulsors should have this extremely low.</remarks>
+		/// <remarks>Default is 0.1.  Repulsors should have this extremely low.</remarks>
 		[KSPField]
 		public float minScrapeSpeed = 0.1f;
 		
@@ -109,30 +103,30 @@ namespace KerbalFoundries
 		/// <summary>KSP path to the effect being used here.  Made into a field so that it can be customized in the future.</summary>
 		/// <remarks>Default is "Effects/fx_smokeTrail_light"</remarks>
 		[KSPField]
-		public const string dustEffectObject = "Effects/fx_smokeTrail_light";
+		public string dustEffectObject = "Effects/fx_smokeTrail_light";
+		
+		/// <summary>Added or subracted from the individual color parameters (rgb) to create a variance in the dust colors.</summary>
+		/// <remarks>Should be a number between "0" and "1" where "0" effectively disables the variance.</remarks>
+		[KSPField]
+		public float colorVariance = 0.24f;
 		
 		bool isPaused;
 		GameObject kfdustFx;
 		ParticleAnimator dustAnimator;
-		Color colorDust;
+		Color colorPrevious;
 		Color colorBiome;
 		Color colorAverage;
 		Color colorCam;
 		Color colorWater;
+		Queue<Color> colorFIFO = new Queue<Color>();
+		
 		bool isColorOverrideActive;
+		float sizeFactor = 1;
+
+		bool isReady;
 		
 		GameObject _kfRepLight;
 		Light _repLight;
-		
-		/// <summary>CollisionInfo class for the DustFX module.</summary>
-		public class CollisionInfo
-		{
-			public KFDustFX KFDustFX;
-			public CollisionInfo(KFDustFX kfdustFX)
-			{
-				KFDustFX = kfdustFX;
-			}
-		}
 		
 		/// <summary>Part Info that will be displayed when part details are shown.</summary>
 		/// <remarks>Can be overridden in the module config on a per-part basis.</remarks>
@@ -145,42 +139,46 @@ namespace KerbalFoundries
 			return strPartInfo;
 		}
 		
+		/// <summary>Standard startup routine.</summary>
+		/// <param name="state">state of the startup stuff.</param>
 		public override void OnStart(StartState state)
 		{
-			if (isRepulsor)
-			{
-				_KFRepulsor = part.GetComponent<KFRepulsor>();
-				tweakScaleCorrector = 1f;
-				Debug.LogWarning("Finding repulsor.");
-			}
-			else
-			{
-				_KFModuleWheel = part.GetComponent<KFModuleWheel>();
-				tweakScaleCorrector = _KFModuleWheel.tweakScaleCorrector;
-				Debug.LogWarning("Finding wheel.");
-			}
-			
 			if (!KFPersistenceManager.isDustEnabled)
 				return;
 			
+			_repModule = part.GetComponent<KFRepulsor>();
+
 			if (HighLogic.LoadedSceneIsFlight)
 			{
-				_ModuleCameraShot = vessel.GetComponent<ModuleCameraShot>();
-				if (dustEffects)
+				_ModuleCameraShot = vessel.rootPart.gameObject.GetComponent<ModuleCameraShot>();
+				if (Equals(_ModuleCameraShot, null)) //add if not... sets some defaults.
+				{
+					_ModuleCameraShot = vessel.rootPart.gameObject.AddComponent<ModuleCameraShot>();
+					_ModuleCameraShot.StartUp();
+				}
+				if (KFPersistenceManager.isDustEnabled)
 					SetupParticles(isRepulsor);
 			}
 			
 			GameEvents.onGamePause.Add(OnPause);
 			GameEvents.onGameUnpause.Add(OnUnpause);
+			isReady = true;
+		}
+
+		/// <summary>Updates stuff.</summary>
+		public void Update()
+		{
+			if (!isReady)
+				return;
+			sizeFactor = tweakScaleFactor * partSizeFactor * KFPersistenceManager.dustAmount;
 		}
 		
 		/// <summary>Defines the particle effects used in this module.</summary>
 		public void SetupParticles(bool repulsor)
 		{
-			if (!dustEffects)
+			if (!KFPersistenceManager.isDustEnabled)
 				return;
 			kfdustFx = (GameObject)GameObject.Instantiate(Resources.Load(dustEffectObject));
-			kfdustFx.transform.parent = part.transform;
 			kfdustFx.transform.position = part.transform.position;
 			kfdustFx.particleEmitter.localVelocity = Vector3.zero;
 			kfdustFx.particleEmitter.useWorldSpace = true;
@@ -189,24 +187,26 @@ namespace KerbalFoundries
 			kfdustFx.particleEmitter.minEmission = minDustEmission;
 			kfdustFx.particleEmitter.minSize = minDustSize;
 			dustAnimator = kfdustFx.particleEmitter.GetComponent<ParticleAnimator>();
-			if (KFPersistenceManager.isRepLightEnabled && repulsor)
-				SetupLights();
+			if (repulsor) // this needs to be run whether the lights are enabled or not, or the lights wont' work properly if switched on in flight
+				SetupRepulsorLights();
 		}
 		
-		void SetupLights()
+		void SetupRepulsorLights()
 		{
 			if (!KFPersistenceManager.isRepLightEnabled)
 				return;
 			_kfRepLight = new GameObject("Rep Light");
-			_kfRepLight.transform.parent = _KFRepulsor._grid;
+			_kfRepLight.transform.parent = part.transform;
 			_kfRepLight.transform.position = Vector3.zero;
 			
 			_repLight = _kfRepLight.AddComponent<Light>();
 			_repLight.type = LightType.Point;
 			_repLight.renderMode = LightRenderMode.ForceVertex;
+			_repLight.shadows = LightShadows.None;
 			_repLight.range = 4.0f;
 			_repLight.color = Color.blue;
 			_repLight.intensity = 0.0f;
+			_repLight.enabled = false;
 		}
 		
 		/// <summary>Called when the part is scraping over a surface.</summary>
@@ -228,20 +228,21 @@ namespace KerbalFoundries
 		/// <param name="direction">Emission direction..</param>
 		public void RepulsorEmit(Vector3 hitPoint, Collider col, float force, Vector3 normal, Vector3 direction)
 		{
-			isColorOverrideActive |= string.Equals("ModuleWaterSlider.Collider", col.gameObject.name);
 			if (isPaused)
 				return;
-
-			//Scrape(hitPoint, col, force, normal, direction);
+			isColorOverrideActive |= string.Equals("ModuleWaterSlider.Collider", col.gameObject.name);
 			DustParticles(force, hitPoint + (part.rigidbody.velocity * Time.deltaTime), col, normal, direction);
 		}
 		
+		/// <summary>Sets up the repulsor lights.</summary>
+		/// <param name="enabled">Are we enabled?</param>
+		/// <param name="squish">How squishy are we?</param>
 		public void RepulsorLight(bool enabled, float squish)
 		{
-			if (KFPersistenceManager.isRepLightEnabled && enabled)
+			if (enabled && KFPersistenceManager.isRepLightEnabled && _repModule.rideHeight >= 1f)
 			{
 				_kfRepLight.transform.localPosition = Vector3.zero;
-				_repLight.intensity = Mathf.Clamp(squish, 0, 0.5f);
+				_repLight.intensity = Mathf.Clamp(squish, 0f, 0.5f);
 				_repLight.enabled = true;
 			}
 			else
@@ -257,32 +258,58 @@ namespace KerbalFoundries
 		/// <param name="col">The collider being referenced.</param>
 		public void DustParticles(float speed, Vector3 contactPoint, Collider col) //(float force, Vector3 contactPoint, Collider col, Vector3 normal, Vector3 direction)
 		{
+			// disable ConvertToConstant.Local
 			bool cameraEnabled = KFPersistenceManager.isDustCameraEnabled;
 			colorWater = new Color(0.65f, 0.65f, 0.65f, 0.025f);
 			
-			if (!dustEffects || speed < minScrapeSpeed || Equals(dustAnimator, null) || !KFPersistenceManager.isDustEnabled)
+			if (speed < minScrapeSpeed || Equals(dustAnimator, null) || !KFPersistenceManager.isDustEnabled)
 				return;
 			
-			if (Equals(tweakScaleCorrector, 0) || tweakScaleCorrector < 0)
-				tweakScaleCorrector = 1f;
+			if (Equals(sizeFactor, 0) || sizeFactor < 0)
+				sizeFactor = 1f;
+			
 			colorBiome = KFDustFXUtils.GetDustColor(vessel.mainBody, col, vessel.latitude, vessel.longitude);
 			
 			cameraEnabled |= Equals(colorBiome, null);
+			Color colorTemp = Color.black;
 			
 			if (cameraEnabled)
 			{
 				colorCam = _ModuleCameraShot._averageColour;
-				colorAverage = ((colorCam * 10) + colorBiome) / 9; // Make the camera colour dominant.
+				colorTemp = (colorCam / 2) + (colorBiome / 2); // Make the camera colour dominant.
+				colorTemp.a = colorBiome.a;
 			}
 			else
-				colorAverage = colorBiome;
+				colorTemp = colorBiome;
+			
+			colorFIFO.Enqueue(colorTemp);
+
+			if (colorFIFO.Count > 100)
+				colorFIFO.Dequeue();
+			
+			Color[] colorArray = colorFIFO.ToArray();
+			
+			float r = 0;
+			float g = 0;
+			float b = 0;
+			float a = 0;
+			
+			for (int i = 0; i < colorArray.Count(); i++)
+			{
+				r += colorArray[i].r;
+				g += colorArray[i].g;
+				b += colorArray[i].b;
+				a += colorArray[i].a;
+			}
+			
+			colorAverage = new Color(r / 100, g / 100, b / 100, a / 50);
 			
 			if (isColorOverrideActive)
 				colorAverage = colorWater;
 			
 			if (speed >= minScrapeSpeed)
 			{
-				if (!Equals(colorAverage, colorDust))
+				if (!Equals(colorAverage, colorPrevious))
 				{
 					Color[] colors = dustAnimator.colorAnimation;
 					colors[0] = colorAverage;
@@ -291,14 +318,14 @@ namespace KerbalFoundries
 					colors[3] = colorAverage;
 					colors[4] = colorAverage;
 					dustAnimator.colorAnimation = colors;
-					colorDust = colorAverage;
+					colorPrevious = colorAverage;
 				}
 				kfdustFx.transform.position = contactPoint;
-				kfdustFx.particleEmitter.maxEnergy = Mathf.Clamp(((speed / maxDustEnergyDiv) * tweakScaleCorrector), minDustEnergy, maxDustEnergy);
+				kfdustFx.particleEmitter.maxEnergy = Mathf.Clamp(((speed / maxDustEnergyDiv) * sizeFactor), minDustEnergy, maxDustEnergy * sizeFactor);
 				// Energy is the thickness of the particles.
-				kfdustFx.particleEmitter.maxEmission = Mathf.Clamp((speed * (maxDustEmissionMult * tweakScaleCorrector)), minDustEmission, (maxDustEmission * tweakScaleCorrector));
+				kfdustFx.particleEmitter.maxEmission = Mathf.Clamp((speed * (maxDustEmissionMult * sizeFactor)), minDustEmission, (maxDustEmission * sizeFactor));
 				// Emission is the number of particles emitted per second.
-				kfdustFx.particleEmitter.maxSize = Mathf.Clamp((speed * tweakScaleCorrector), minDustSize, maxDustSize);
+				kfdustFx.particleEmitter.maxSize = Mathf.Clamp((speed * sizeFactor), minDustSize, maxDustSize * sizeFactor);
 				// Size is self explanatory.  For wheels, I suggest values between 0.1 and 2.
 				kfdustFx.particleEmitter.Emit();
 			}
@@ -314,13 +341,11 @@ namespace KerbalFoundries
 		/// <param name="direction">A direction to emit this stuff.</param>
 		void DustParticles(float force, Vector3 contactPoint, Collider col, Vector3 normal, Vector3 direction)
 		{
-			if (!dustEffects || force < minScrapeSpeed || Equals(dustAnimator, null))
+			if (force < minScrapeSpeed || Equals(dustAnimator, null))
 				return;
-            
 			kfdustFx.transform.rotation = Quaternion.Euler(normal);
 			kfdustFx.particleEmitter.localVelocity = direction;
 			DustParticles(force, contactPoint, col);
-			
 			return;
 		}
 		
@@ -335,17 +360,14 @@ namespace KerbalFoundries
 		void OnUnpause()
 		{
 			isPaused = false;
-			kfdustFx.particleEmitter.enabled = true;
+			kfdustFx.particleEmitter.enabled |= KFPersistenceManager.isDustEnabled;
 		}
 		
 		/// <summary>Called when the object being referenced is destroyed, or when the module instance is deactivated.</summary>
 		void OnDestroy()
 		{
-			//Debug.LogWarning(string.Format("{0}Stopped Audio.", logprefix));
 			GameEvents.onGamePause.Remove(OnPause);
-			//Debug.LogWarning(string.Format("{0}Removed OnPause hook.", logprefix));
 			GameEvents.onGameUnpause.Remove(OnUnpause);
-			//Debug.LogWarning(string.Format("{0}Removed OnUnPause hook.", logprefix));
 		}
 	}
 }

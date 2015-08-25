@@ -1,6 +1,6 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Collections;
+using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 
@@ -8,35 +8,38 @@ namespace KerbalFoundries
 {
     public class KFModuleWheel : PartModule
     {
+        // disable UnusedParameter
 		// disable RedundantDefaultFieldInitializer
 		// disable RedundantThisQualifier
         // disable ConvertIfToOrExpression
         // disable ConvertIfStatementToConditionalTernaryExpression
 		
 		// Name definitions
-        public const string right = "right";
-        public const string forward = "forward";
-        public const string up = "up";
+        const string right = "right";
+        const string forward = "forward";
+        const string up = "up";
 
 		// Tweakables
         [KSPField(isPersistant = false, guiActive = true, guiName = "Wheel Settings")]
         public string settings = string.Empty;
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "Group Number"), UI_FloatRange(minValue = 0, maxValue = 10f, stepIncrement = 1f)]
-        public float groupNumber = 1;
+        public float groupNumber = 1f;
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "Torque Ratio"), UI_FloatRange(minValue = 0, maxValue = 2f, stepIncrement = .25f)]
-        public float torque = 1;
+        public float torque = 1f;
         [KSPField(isPersistant = true, guiActive = false, guiActiveEditor = true, guiName = "Spring Strength"), UI_FloatRange(minValue = 0, maxValue = 6.00f, stepIncrement = 0.2f)]
         public float springRate;        
         [KSPField(isPersistant = true, guiActive = false, guiActiveEditor = true, guiName = "Spring Damping"), UI_FloatRange(minValue = 0, maxValue = 1.0f, stepIncrement = 0.025f)]
         public float damperRate;
-        [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "Suspension Travel"), UI_FloatRange(minValue = 0, maxValue = 100, stepIncrement = 5)]
-        public float rideHeight = 100;
+        [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "Suspension Travel"), UI_FloatRange(minValue = 0, maxValue = 100f, stepIncrement = 5f)]
+        public float rideHeight = 100f;
         [KSPField(isPersistant = true, guiActive = true, guiActiveEditor = true, guiName = "Steering"), UI_Toggle(disabledText = "Enabled", enabledText = "Disabled")]
         public bool steeringDisabled;
         [KSPField(isPersistant = true, guiActive = false, guiActiveEditor = true, guiName = "Start"), UI_Toggle(disabledText = "Deployed", enabledText = "Retracted")]
         public bool startRetracted;
         [KSPField(isPersistant = false, guiActive = true, guiName = "Status")]
         public string status = "Nominal";
+        [KSPField(isPersistant = false, guiActive = true, guiName = "RPM", guiFormat = "F1")] 
+        public float averageTrackRPM;
         
 		// Config fields
 		/// <summary>Torque applied to wheel colliders.</summary>
@@ -130,21 +133,23 @@ namespace KerbalFoundries
 		/// <summary>Saves the brake state.</summary>
         [KSPField(isPersistant = true)]
 		public bool brakesApplied;
+		
+		/// <summary>Saves the retracted state.</summary>
         [KSPField(isPersistant = true)]
         public bool isRetracted = false;
 
 		// Global variables
-        int rootIndexLong;      
+        int rootIndexLong;
         int rootIndexLat;
         int rootIndexUp;
-        int controlAxisIndex;  
+        int controlAxisIndex;
         uint commandId;
         uint lastCommandId;
         float brakeTorque;
         float motorTorque;
+        bool isReady;
 
-        
-        int groundedWheels = 0; 
+        int groundedWheels = 0;
         float effectPower;
         float trackRPM = 0;
         float lastPartCount;
@@ -164,6 +169,7 @@ namespace KerbalFoundries
         public float degreesPerTick;
         public float currentTravel;
         public float smoothedTravel;
+		public float susInc;
 
         //Visible fields (debug)
         [KSPField(isPersistant = true, guiActive = false, guiName = "TS", guiFormat = "F1")] //debug only.
@@ -172,8 +178,7 @@ namespace KerbalFoundries
         public float lastVesselMass;
         [KSPField(isPersistant = false, guiActive = false, guiName = "Vessel Mass", guiFormat = "F1")]
         public float vesselMass;
-        [KSPField(isPersistant = false, guiActive = false, guiName = "RPM", guiFormat = "F1")]
-        public float averageTrackRPM;
+        
         [KSPField(isPersistant = false, guiActive = false, guiName = "Colliders", guiFormat = "F0")]
         public int _colliderCount = 0;
         [KSPField(isPersistant = false, guiActive = false, guiName = "Collider Mass", guiFormat = "F2")]
@@ -187,6 +192,10 @@ namespace KerbalFoundries
         List<float> suspensionDistance = new List<float>();
         ModuleAnimateGeneric retractionAnimation;
         KFDustFX _dustFX;
+        
+		/// <summary>Logging utility.</summary>
+		/// <remarks>Call using "KFLog.log_type"</remarks>
+		readonly KFLogUtil KFLog = new KFLogUtil("KFModuleWheel");
         
 		/// <summary>This is the info string that will display when the part info is shown.</summary>
 		/// <remarks>This can be overridden in the config for this module in the part file.</remarks>
@@ -208,19 +217,12 @@ namespace KerbalFoundries
 		public override void OnStart(PartModule.StartState state)  //when started
         {
 			base.OnStart(state);
-
-			CustomResourceTextSetup(); // Calls a method to set up the statusLowResource text for resource alternatives.
-            
-            _dustFX = this.part.GetComponent<KFDustFX>(); //see if it's been added by MM.  Actually, it's being added directly to the configs now. - Gaalidas
-            if (Equals(_dustFX, null)) //add if not... sets some defaults.
-            {
-                this.part.AddModule("KFDustFX");
-                _dustFX = this.part.GetComponent<KFDustFX>();
-                _dustFX.maxDustEmission = 28; // This actually has a default setting in the module, so setting it here like this is rather redundant unless we can set this value from a part-size detection method. - Gaalidas.
-                _dustFX.OnStart(state);
-            }
 			
-            _colliderMass = 10; //jsut a beginning value to stop stuff going crazy before it's all calculated properly.
+			susInc = KFPersistenceManager.suspensionIncrement;
+			
+			CustomResourceTextSetup(); // Calls a method to set up the statusLowResource text for resource alternatives.
+
+            _colliderMass = 10; //just a beginning value to stop stuff going crazy before it's all calculated properly.
             
             var partOrientationForward = new Vector3(0,0,0);
             var partOrientationRight = new Vector3(0, 0, 0);
@@ -228,14 +230,14 @@ namespace KerbalFoundries
 
             if (!string.Equals(orientationObjectName, "Default"))
             {
-                Debug.LogWarning("Transformed part orientation.");
+                KFLog.Warning("Transformed part orientation.");
                 partOrientationUp = transform.Search(orientationObjectName).up;
                 partOrientationForward = transform.Search(orientationObjectName).forward;
                 partOrientationRight = transform.Search(orientationObjectName).right;
             }
             else
             {
-                Debug.LogWarning("Default part orientation.");
+                KFLog.Warning("Default part orientation.");
                 partOrientationUp = this.part.transform.up;
                 partOrientationForward = this.part.transform.forward;
                 partOrientationRight = this.part.transform.right;
@@ -252,26 +254,26 @@ namespace KerbalFoundries
                 SetupAnimation();
             }
 
-            print(System.Reflection.Assembly.GetExecutingAssembly().GetName().Version);
+            KFLog.Log(string.Format("Version: {0}", System.Reflection.Assembly.GetExecutingAssembly().GetName().Version));
 
             //disables tweakables if being used on a passive part (mecannum wheel or skid, for example)
             if (disableTweakables)
             {
-                Debug.LogWarning("Disabling tweakables.");
+                KFLog.Warning("Disabling tweakables.");
                 foreach (BaseField k in this.Fields)
                 {
-					print(string.Format("Found {0}", k.guiName));
+					KFLog.Log(string.Format("Found {0}", k.guiName));
                     k.guiActive = false;
                     k.guiActiveEditor = false;
                 }
                 foreach (BaseAction a in this.Actions)
                 {
-					print(string.Format("Found {0}", a.guiName));
+					KFLog.Log(string.Format("Found {0}", a.guiName));
                     a.active = false;
                 }
                 foreach (BaseEvent e in this.Events)
                 {
-					print(string.Format("Found {0}", e.guiName));
+					KFLog.Log(string.Format("Found {0}", e.guiName));
                     e.active = false;
                 }
             }
@@ -283,9 +285,9 @@ namespace KerbalFoundries
                 currentTravel = rideHeight; //set up correct values from persistence
             else
                 currentTravel = 0;
-            //print(appliedRideHeight);
+            //KFLog.Log(string.Format("\"appliedRideHeight\" = {0}", appliedRideHeight));
             
-            //disable retract tweakables is retract option not specified
+            // Disable retract tweakables if retract option not specified.
 			if (HighLogic.LoadedSceneIsEditor && !hasRetract)
             {
                 Extensions.DisableAnimateButton(this.part);
@@ -295,8 +297,16 @@ namespace KerbalFoundries
                 Fields["startRetracted"].guiActiveEditor = false;
             } 
 
-            if (HighLogic.LoadedSceneIsFlight)
+            if (HighLogic.LoadedSceneIsFlight && !Equals(vessel.vesselType, VesselType.Debris)) // && vessel.parts.Count > 1) // Vessels don't have to be made up of only one part to still be considered debris.
             {
+                _dustFX = this.part.gameObject.GetComponent<KFDustFX>();
+                if (Equals(_dustFX, null)) //add if not... sets some defaults.
+                {
+                    _dustFX = this.part.gameObject.AddComponent<KFDustFX>();
+                    _dustFX.OnStart(state);
+                }
+                _dustFX.tweakScaleFactor = tweakScaleCorrector;
+
                 appliedTravel = rideHeight / 100; // need to be here if no KFWheel or everything gets set to zero as below.
                 StartCoroutine(StartupStuff());
                 maxRPM /= tweakScaleCorrector;
@@ -316,7 +326,7 @@ namespace KerbalFoundries
                     torque /= 100;
 				
                 wheelCount = 0;
-				this.part.force_activate(); // Force the part active or OnFixedUpate is not called
+				
 				foreach (WheelCollider wc in this.part.GetComponentsInChildren<WheelCollider>()) // Set colliders to values chosen in editor and activate
                 {
                     wheelCount++;
@@ -336,7 +346,7 @@ namespace KerbalFoundries
 				
                 if (isRetracted)
                     RetractDeploy("retract");
-				
+                isReady = true;
 			} // End scene is flight
 			DestroyBounds();
 		}
@@ -355,14 +365,16 @@ namespace KerbalFoundries
         {
             yield return new WaitForFixedUpdate();
             lastPartCount = this.vessel.Parts.Count();
-			print(string.Format("Part Count {0}", lastPartCount));
-            print("Checking vessel mass.");
+			KFLog.Log(string.Format("Part Count {0}", lastPartCount));
+            KFLog.Log("Checking vessel mass.");
             _colliderMass = ChangeColliderMass();
         }
 
         /// <summary>Physics critical stuff.</summary>
-        public override void OnFixedUpdate()
+        public void FixedUpdate()
         {
+            if (!isReady)
+                return;
 			// User input
             float steeringTorque;
             float brakeSteering;
@@ -410,23 +422,26 @@ namespace KerbalFoundries
 
             smoothedTravel = Mathf.Lerp(smoothedTravel, currentTravel, Time.deltaTime * 2);
             appliedTravel = smoothedTravel / 100;
+			
+			susInc = KFPersistenceManager.suspensionIncrement;
 		}
 		//End OnFixedUpdate
 
         /// <summary>Stuff that doesn't need to happen every physics frame.</summary>
-        public override void OnUpdate()
+        public void Update()
         {
-            base.OnUpdate();
+            if (!isReady)
+                return;
             commandId = this.vessel.referenceTransformId;
 			if (!Equals(commandId, lastCommandId))
             {
-                //print("Control Axis Changed.");
+                //KFLog.Log("Control Axis Changed.");
                 GetControlAxis();
             }
             vesselMass = this.vessel.GetTotalMass();
             if (!Equals(Math.Round(vesselMass, 1), Math.Round(lastVesselMass, 1)))
             {
-                //print("Vessel mass changed.");
+                //KFLog.Log("Vessel mass changed.");
                 _colliderMass = ChangeColliderMass();
                 lastPartCount = this.vessel.Parts.Count();
                 ApplySteeringSettings();
@@ -439,11 +454,9 @@ namespace KerbalFoundries
 
         /// <summary>
         /// Applies calculated torque, braking and steering to the wheel colliders,
-        /// gathers some information such as RPM and invokes the DustFX where appropriate
+        /// gathers some information such as RPM and invokes the DustFX where appropriate.
         /// </summary>
-        /// <remarks>
-        /// This is a major chunk of what happens in FixedUpdate if the part is deployed.
-        /// </remarks>
+        /// <remarks>This is a major chunk of what happens in FixedUpdate if the part is deployed.</remarks>
         void UpdateColliders()
         {
             float requestedResource;
@@ -452,7 +465,7 @@ namespace KerbalFoundries
             float resourceConsumption = Time.deltaTime * resourceConsumptionRate * (Math.Abs(motorTorque) / 100);
             requestedResource = part.RequestResource(resourceName, resourceConsumption);
             float freeWheelRPM = 0;
-			//print(string.Format("{0} {1}", requestedResource, resourceConsumption));
+			//KFLog.Log(string.Format("{0} {1}", requestedResource, resourceConsumption));
             if (requestedResource < resourceConsumption - 0.1f)// && resourceConsumption != 0)
             {
                 motorTorque = 0;
@@ -525,18 +538,18 @@ namespace KerbalFoundries
                 if (!Equals(KFMW, null) )
                 {
                     KFMWList.Add(KFMW);
-					//print(string.Format("Found KFModuleWheel in {0}.", this.vessel.parts[i].partInfo.name));
+					//KFLog.Log(string.Format("Found KFModuleWheel in {0}.", this.vessel.parts[i].partInfo.name));
                     
                     colliderCount += KFMW.wcList.Count();
                 }
             }
             float colliderMass = this.vessel.GetTotalMass() / colliderCount;
-            print(colliderMass);
+            KFLog.Log(string.Format("colliderMass: {0}", colliderMass));
 
             // set all this up in the other wheels to prevent them having to do so themselves. First part has the honour.
             for (int i = 0; i < KFMWList.Count(); i++)
             {
-				//print(string.Format("Setting collidermass in other wheel {0}.", KFMWList[i].part.partInfo.name));
+				//KFLog.Log(string.Format("Setting collidermass in other wheel {0}.", KFMWList[i].part.partInfo.name));
 				KFMWList[i]._colliderMass = colliderMass;
 				KFMWList[i].lastVesselMass = this.vesselMass; //this should mean that the method does not get triggered for subsequent wheels.
                 KFMWList[i].vesselMass = this.vesselMass;
@@ -620,7 +633,7 @@ namespace KerbalFoundries
             {
 				UnityEngine.Object.Destroy(bounds.gameObject);
                 //boundsDestroyed = true; //remove the bounds object to let the wheel colliders take over
-                print("Destroying Bounds.");
+                KFLog.Log("Destroying Bounds.");
             }
         }
 
@@ -660,7 +673,6 @@ namespace KerbalFoundries
         {
             steeringDisabled = !steeringDisabled;
 		}
-
         
         [KSPAction("Invert Steering")]
         public void InvertSteeringAG(KSPActionParam param)
@@ -672,7 +684,7 @@ namespace KerbalFoundries
         public void LowerRideHeight(KSPActionParam param)
         {
             if (rideHeight > 0)
-                rideHeight -= 5;
+                rideHeight -= Mathf.Clamp(susInc, 0f, 100f);
 
             ApplySettings(true);
         }
@@ -681,10 +693,47 @@ namespace KerbalFoundries
         public void RaiseRideHeight(KSPActionParam param)
         {
             if (rideHeight < 100)
-                rideHeight += 5;
+            	rideHeight += Mathf.Clamp(susInc, 0f, 100f);
 
             ApplySettings(true);
         }
+        
+        #region Presets
+        /// <summary>Sets the rideHeight to the preset value specified.</summary>
+        /// <param name="value">The height requested. (0-100 float)</param>
+        void Presetter(float value)
+        {
+			rideHeight = Mathf.Clamp(value, 0f, 100f);
+			ApplySettings(true);
+        }
+        
+        [KSPAction("Suspension 0")]
+        public void SuspZero(KSPActionParam param)
+        {
+			Presetter(0);
+        }
+        [KSPAction("Suspension 25")]
+        public void SuspQuarter(KSPActionParam param)
+        {
+			Presetter(25);
+        }
+        [KSPAction("Suspension 50")]
+        public void SuspFifty(KSPActionParam param)
+        {
+			Presetter(50);
+        }
+        [KSPAction("Suspension 75")]
+        public void SuspThreeQuarter(KSPActionParam param)
+        {
+			Presetter(75);
+        }
+        [KSPAction("Suspension 100")]
+        public void SuspFull(KSPActionParam param)
+        {
+			Presetter(100);
+        }
+        
+        #endregion Presets
 
         [KSPAction("Apply Wheel")]
         public void ApplyWheelAction(KSPActionParam param)
@@ -697,6 +746,7 @@ namespace KerbalFoundries
         {
             ApplySteeringSettings();
         }
+        
         [KSPAction("Toggle Deployed")]
         public void AGToggleDeployed(KSPActionParam param)
         {
@@ -777,14 +827,8 @@ namespace KerbalFoundries
             }
         }
 
-       
-
-        
-
         //Addons by Gaalidas
-
-   
-        /// <summary>Initializes some custom text data for the status strings.</summary>
+		/// <summary>Initializes some custom text data for the status strings.</summary>
         public void CustomResourceTextSetup()
         {
 			string textoutput = string.Empty;
